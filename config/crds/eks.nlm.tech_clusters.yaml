@@ -3500,7 +3500,7 @@ spec:
                   - type
                   type: object
                 type: array
-              nodePools:
+              nodeGroups:
                 items:
                   properties:
                     conditions:
@@ -3529,9 +3529,6 @@ spec:
                   - name
                   type: object
                 type: array
-            required:
-            - conditions
-            - nodePools
             type: object
         type: object
     served: true

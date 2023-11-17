@@ -47,7 +47,7 @@ func SetClusterCondition(es *v1alpha1.Cluster, condition v1alpha1.StatusConditio
 
 // GetNodePoolCondition returns the condition with the provided type.
 func GetNodePoolCondition(poolName string, status v1alpha1.ClusterStatus, condType v1alpha1.ConditionType) *v1alpha1.StatusCondition {
-	for _, pool := range status.NodePools {
+	for _, pool := range status.NodeGroups {
 		if poolName != pool.Name {
 			continue
 		}
@@ -75,11 +75,11 @@ func SetNodePoolCondition(poolName string, es *v1alpha1.Cluster, condition v1alp
 		condition.LastTransitionTime = currentCond.LastTransitionTime
 	}
 
-	for i, pool := range es.Status.NodePools {
+	for i, pool := range es.Status.NodeGroups {
 		if pool.Name != poolName {
 			continue
 		}
-		es.Status.NodePools[i].Conditions = append(filterOutCondition(es.Status.Conditions, condition.Type), condition)
+		es.Status.NodeGroups[i].Conditions = append(filterOutCondition(es.Status.Conditions, condition.Type), condition)
 	}
 }
 

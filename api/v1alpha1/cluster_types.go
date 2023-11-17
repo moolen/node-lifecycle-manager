@@ -23,6 +23,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	LabelClusterName = "eks.nlm.tech/cluster-name"
+	LabelNodeIAMRole = "eks.nlm.tech/node-iam-role"
+	LabelNodePool    = "eks.nlm.tech/node-pool"
+)
+
 // ClusterSpec defines the desired state of Cluster
 type ClusterSpec struct {
 	Region        string        `json:"region"`
@@ -67,11 +73,14 @@ type Cluster struct {
 
 // ClusterStatus defines the observed state of Cluster
 type ClusterStatus struct {
+	// +kubebuilder:validation:Optional
 	Conditions []StatusCondition `json:"conditions"`
-	NodePools  []NodePoolStatus  `json:"nodePools"`
+
+	// +kubebuilder:validation:Optional
+	NodeGroups []NodeGroupStatus `json:"nodeGroups,omitempty"`
 }
 
-type NodePoolStatus struct {
+type NodeGroupStatus struct {
 	Name       string            `json:"name"`
 	Conditions []StatusCondition `json:"conditions"`
 }
