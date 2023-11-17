@@ -1,0 +1,81 @@
+#   create/manage many Kind=AWSNodeGroup resources
+#   roll them one by one
+apiVersion: eks.nlm.tech/v1alpha1
+Kind: Cluster
+metadata:
+  name: general
+spec: 
+  nodeGroupSpec:
+    # define a strategy for the node rollout process
+    # this allows you to parallelize it.
+    updateStrategy: 
+      rollingUpdate:
+        maxUnavailable: 1
+
+    template:
+      nodeGroupSpec:
+        deletionPolicy: Delete
+        managementPolicies: ["*"]
+        forProvider:
+          region: eu-central-1 # <-- from cluster spec?
+          amiType: CUSTOM
+          scalingConfig:
+            - desiredSize: 1
+              maxSize: 1
+              minSize: 1
+          launchTemplate:
+            - name: example
+              version: "$Latest"
+          clusterNameRef:
+            name: mj-eso # <-- infer via cluster spec
+          subnetIdRefs:
+            - name: subnet-1 # <-- infer via cluster spec
+          nodeRoleArnRef:
+            name: node-role
+          labels:
+            pool: bar # <-- from pool.name
+      launchTemplateSpec:
+        forProvider:
+          vpcSecurityGroupIds:
+            - sg-04814377e821d37d5 # <-- where do these come from?
+            - sg-0ee01b07890b42521
+            - sg-09442361e07fdf0f7
+          blockDeviceMappings:
+            - deviceName: /dev/sda1
+              ebs:
+                - volumeSize: 20
+          imageId: ami-0b9b30c466935db49 # <--
+          disableApiTermination: true
+          # instanceType: t2.micro
+          metadataOptions:
+            - httpEndpoint: enabled
+              httpPutResponseHopLimit: 1
+              httpTokens: required
+              instanceMetadataTags: enabled
+          name: example
+          placement:
+            - availabilityZone: eu-central-1a # <--
+          region: eu-central-1 # <-- from cluster spec
+          tagSpecifications:
+            - resourceType: instance
+              tags:
+                Name: test-lg
+    groups:
+    - name: general
+      ami: ami-1111
+    - name: foo
+      ami: ami-1111
+    - name: bar
+      name: ami-1111
+
+status:
+  nodePools:
+  - name: "general"
+    version: "..."
+    conditions:
+    - type: Upgrading
+      status: "True"
+    - type: Ready
+      status: "False"
+  - name: "foo"
+  - name: "bar"
