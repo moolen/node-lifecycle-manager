@@ -17,19 +17,15 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
-	"text/template"
+	"strings"
 	"time"
 
 	"github.com/wI2L/jsondiff"
 
-	crossplanecommonv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/go-logr/logr"
 	"github.com/moolen/node-lifecycle-manager/api/v1alpha1"
 	ec2v1beta1 "github.com/upbound/provider-aws/apis/ec2/v1beta1"
@@ -44,7 +40,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
-	utilpointer "k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -136,9 +131,10 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				Name: groupName,
 			},
 		}
-		op, err := controllerutil.CreateOrUpdate(ctx, r.Client, launchTemplate, func() error {
+		updateFn := func() error {
 			return r.updateLaunchTemplate(candidate.Group, cluster, candidate.Subnet.Status.AtProvider.AvailabilityZone, eksCluster, launchTemplate)
-		})
+		}
+		op, err := controllerutil.CreateOrUpdate(ctx, r.Client, launchTemplate, updateFn)
 		if err != nil {
 			r.setReadyCondition(&cluster, v1.ConditionFalse, v1alpha1.ConditionReasonUpgrading, err.Error())
 			return ctrl.Result{}, err
@@ -158,13 +154,19 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			continue
 		}
 
+		if !launchTemplateSynced(*launchTemplate) {
+			logger.Info("launch template not yet synced, requeueing")
+			requeue = true
+			continue
+		}
+
 		// update/verify node group
 		nodeGroup := &eksv1beta1.NodeGroup{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: groupName,
 			},
 		}
-		err = r.createOrApply(ctx, nodeGroup, func() error {
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, nodeGroup, func() error {
 			r.updateNodeGroup(candidate.Group, cluster, candidate.Subnet, nodeGroup, *launchTemplate.Status.AtProvider.LatestVersion)
 			return nil
 		})
@@ -250,6 +252,13 @@ func (r *ClusterReconciler) getUpdateCandidates(ctx context.Context, cluster v1a
 				})
 				continue
 			}
+			if !launchTemplateSynced(*launchTemplate) {
+				candidates = append(candidates, UpdateCandidate{
+					Group:  group,
+					Subnet: subnet,
+				})
+				continue
+			}
 
 			// cases:
 			// - node group does not exist
@@ -322,6 +331,38 @@ func (r ClusterReconciler) needsUpdate(ctx context.Context, obj ClientObject, f 
 		return true
 	}
 	return !equality.Semantic.DeepEqual(existing, obj)
+}
+
+func (r *ClusterReconciler) getAwaitingUpdateDiff(ctx context.Context, obj ClientObject, f controllerutil.MutateFn) (jsondiff.Patch, error) {
+	key := client.ObjectKeyFromObject(obj)
+	if err := r.Get(ctx, key, obj); err != nil {
+		return nil, err
+	}
+	existing := obj.DeepCopyObject()
+	if err := mutate(f, key, obj); err != nil {
+		return nil, err
+	}
+
+	patches, err := jsondiff.Compare(existing, obj)
+	if err != nil {
+		return nil, err
+	}
+
+	// everything that is being changed in /spec/forProvider
+	// will be reconciled by crossplane and the value in
+	var filteredPatches jsondiff.Patch
+	for _, p := range patches {
+		if strings.HasPrefix(p.Path, "/spec/forProvider") {
+			filteredPatches = append(filteredPatches, jsondiff.Operation{
+				Value: p.Value,
+				Type:  p.Type,
+				From:  p.From,
+				Path:  strings.Replace(p.Path, "/spec/forProvider", "/status/atProvider", 1),
+			})
+		}
+	}
+
+	return filteredPatches, nil
 }
 
 func (r ClusterReconciler) createOrApply(ctx context.Context, obj ClientObject, f controllerutil.MutateFn) error {
@@ -397,7 +438,7 @@ func (r *ClusterReconciler) initialize(ctx context.Context, cluster v1alpha1.Clu
 			},
 		},
 	}
-	err := r.createOrApply(ctx, eksCluster, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, eksCluster, func() error {
 		r.updateEKSCluster(cluster, eksCluster)
 		return nil
 	})
@@ -421,7 +462,7 @@ func (r *ClusterReconciler) initialize(ctx context.Context, cluster v1alpha1.Clu
 					},
 				},
 			}
-			err = r.createOrApply(ctx, eksSubnet, func() error {
+			_, err = controllerutil.CreateOrUpdate(ctx, r.Client, eksSubnet, func() error {
 				r.updateSubnet(*subnet, cluster, eksSubnet)
 				return nil
 			})
@@ -445,7 +486,7 @@ func (r *ClusterReconciler) initialize(ctx context.Context, cluster v1alpha1.Clu
 			Name: fmt.Sprintf("%s-eks-worker-node", cluster.Name),
 		},
 	}
-	err = r.createOrApply(ctx, workerIamRole, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, workerIamRole, func() error {
 		r.updateWorkerIamRole(cluster, workerIamRole)
 		return nil
 	})
@@ -460,320 +501,6 @@ func (r *ClusterReconciler) initialize(ctx context.Context, cluster v1alpha1.Clu
 	// TODO: create custom SG + rules if needed
 
 	return false, nil
-}
-
-func (r *ClusterReconciler) updateEKSCluster(cluster v1alpha1.Cluster, eksCluster *eksv1beta1.Cluster) {
-	controllerutil.SetControllerReference(&cluster, &eksCluster.ObjectMeta, r.Scheme)
-
-	// note: we must set the keys individually, we should not directly assign .Spec,
-	//       otherwise values provided by crossplane would be overridden with the default value.
-	//       We would end up in a case where both controllers fight over the .Spec values.
-	//       As a matter of fact, crossplane will likely fail to update the status
-	//       due to a resource conflict.
-	eksCluster.Annotations = map[string]string{
-		"crossplane.io/external-name": cluster.Name,
-	}
-	eksCluster.Labels = map[string]string{
-		v1alpha1.LabelClusterName: cluster.Name,
-	}
-	eksCluster.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
-	eksCluster.Spec.ResourceSpec.ManagementPolicies = crossplanecommonv1.ManagementPolicies{
-		crossplanecommonv1.ManagementActionObserve,
-	}
-	eksCluster.Spec.ForProvider.Region = &cluster.Spec.Region
-}
-
-func (r *ClusterReconciler) updateSubnet(name string, cluster v1alpha1.Cluster, subnet *ec2v1beta1.Subnet) {
-	controllerutil.SetControllerReference(&cluster, &subnet.ObjectMeta, r.Scheme)
-
-	// note: we must set the keys individually, we should not directly assign .Spec,
-	//       otherwise values provided by crossplane would be overridden with the default value.
-	//       We would end up in a case where both controllers fight over the .Spec values.
-	//       As a matter of fact, crossplane will likely fail to update the status
-	//       due to a resource conflict.
-	subnet.ObjectMeta.Labels = map[string]string{
-		v1alpha1.LabelClusterName: cluster.Name,
-	}
-	subnet.ObjectMeta.Annotations = map[string]string{
-		"crossplane.io/external-name": name,
-	}
-	subnet.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
-	subnet.Spec.ForProvider.Region = &cluster.Spec.Region
-	subnet.Spec.ResourceSpec.ManagementPolicies = crossplanecommonv1.ManagementPolicies{
-		crossplanecommonv1.ManagementActionObserve,
-	}
-}
-
-// note: user-data must start with either `#!` or `content-type`
-// https://cloudinit.readthedocs.io/en/latest/explanation/format.html#user-data-script
-const launchTemplateUserDataTpl = `#!/bin/bash
-set -ex
-
-/etc/eks/bootstrap.sh {{ .cluster_name }} \
-  --b64-cluster-ca {{ .cluster_ca_data }} \
-  --apiserver-endpoint {{ .cluster_endpoint }}
-`
-
-func (r *ClusterReconciler) updateLaunchTemplate(group v1alpha1.NodeGroup, cluster v1alpha1.Cluster, availabilityZone *string, eksCluster eksv1beta1.Cluster, launchTemplate *ec2v1beta1.LaunchTemplate) error {
-	controllerutil.SetControllerReference(&cluster, &launchTemplate.ObjectMeta, r.Scheme)
-	name := nodeGroupName(group.Name, *availabilityZone)
-
-	// note: we must set the keys individually, we should not directly assign .Spec,
-	//       otherwise values provided by crossplane would be overridden with the default value.
-	//       We would end up in a case where both controllers fight over the .Spec values.
-	//       As a matter of fact, crossplane will likely fail to update the status
-	//       due to a resource conflict.
-	launchTemplate.ObjectMeta.Labels = map[string]string{
-		v1alpha1.LabelClusterName: cluster.Name,
-	}
-	launchTemplate.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
-
-	// TODO: consider exposing block device configuration via Cluster.spec.nodeGroupSpec.groups[]
-	launchTemplate.Spec.ForProvider.BlockDeviceMappings = []ec2v1beta1.BlockDeviceMappingsParameters{
-		{
-			DeviceName: utilpointer.String("/dev/sda1"),
-			EBS: []ec2v1beta1.EBSParameters{
-				{
-					VolumeSize: utilpointer.Float64(40),
-				},
-			},
-		},
-	}
-	launchTemplate.Spec.ForProvider.MetadataOptions = []ec2v1beta1.LaunchTemplateMetadataOptionsParameters{
-		{
-			HTTPEndpoint:            utilpointer.String("enabled"),
-			HTTPPutResponseHopLimit: utilpointer.Float64(1),
-			HTTPTokens:              utilpointer.String("required"),
-			InstanceMetadataTags:    utilpointer.String("enabled"),
-		},
-	}
-	launchTemplate.Spec.ForProvider.TagSpecifications = []ec2v1beta1.TagSpecificationsParameters{
-		{
-			ResourceType: utilpointer.String("instance"),
-			Tags: map[string]*string{
-				"Name": utilpointer.String(group.Name),
-			},
-		},
-	}
-	launchTemplate.Spec.ForProvider.Region = &cluster.Spec.Region
-	launchTemplate.Spec.ForProvider.ImageID = utilpointer.String(group.AMI)
-	launchTemplate.Spec.ForProvider.Name = utilpointer.String(name)
-	launchTemplate.Spec.ForProvider.Placement = []ec2v1beta1.PlacementParameters{
-		{
-			AvailabilityZone: availabilityZone,
-		},
-	}
-	launchTemplate.Spec.ForProvider.VPCSecurityGroupIds = append(
-		eksCluster.Status.AtProvider.VPCConfig[0].SecurityGroupIds,
-		eksCluster.Status.AtProvider.VPCConfig[0].ClusterSecurityGroupID,
-	)
-
-	// user-data
-	tpl, err := template.New("user-data").Parse(launchTemplateUserDataTpl)
-	if err != nil {
-		return err
-	}
-	var buf bytes.Buffer
-	err = tpl.Execute(&buf, map[string]string{
-		"cluster_name":     cluster.Name,
-		"cluster_ca_data":  *eksCluster.Status.AtProvider.CertificateAuthority[0].Data,
-		"cluster_endpoint": *eksCluster.Status.AtProvider.Endpoint,
-	})
-	if err != nil {
-		return err
-	}
-	launchTemplate.Spec.ForProvider.UserData = utilpointer.String(base64.StdEncoding.EncodeToString(buf.Bytes()))
-	return nil
-}
-
-var (
-	assumeRolePolicy = `{
-	"Version": "2012-10-17",
-	"Statement": [
-		{
-			"Sid": "EKSNodeAssumeRole",
-			"Effect": "Allow",
-			"Principal": {
-				"Service": "ec2.amazonaws.com"
-			},
-			"Action": "sts:AssumeRole"
-		}
-	]
-}`
-
-	ecrReadPolicy = `{
-	"Version": "2012-10-17",
-	"Statement": [
-		{
-			"Effect": "Allow",
-			"Action": [
-				"ecr:GetAuthorizationToken",
-				"ecr:BatchCheckLayerAvailability",
-				"ecr:GetDownloadUrlForLayer",
-				"ecr:GetRepositoryPolicy",
-				"ecr:DescribeRepositories",
-				"ecr:ListImages",
-				"ecr:DescribeImages",
-				"ecr:BatchGetImage",
-				"ecr:GetLifecyclePolicy",
-				"ecr:GetLifecyclePolicyPreview",
-				"ecr:ListTagsForResource",
-				"ecr:DescribeImageScanFindings"
-			],
-			"Resource": "*"
-		}
-	]
-}`
-
-	cniPolicy = `{
-	"Version": "2012-10-17",
-	"Statement": [
-		{
-			"Effect": "Allow",
-			"Action": [
-				"ec2:AssignPrivateIpAddresses",
-				"ec2:AttachNetworkInterface",
-				"ec2:CreateNetworkInterface",
-				"ec2:DeleteNetworkInterface",
-				"ec2:DescribeInstances",
-				"ec2:DescribeTags",
-				"ec2:DescribeNetworkInterfaces",
-				"ec2:DescribeInstanceTypes",
-				"ec2:DetachNetworkInterface",
-				"ec2:ModifyNetworkInterfaceAttribute",
-				"ec2:UnassignPrivateIpAddresses"
-			],
-			"Resource": "*"
-		},
-		{
-			"Effect": "Allow",
-			"Action": [
-				"ec2:CreateTags"
-			],
-			"Resource": [
-				"arn:aws:ec2:*:*:network-interface/*"
-			]
-		}
-	]
-}`
-
-	workerNodePolicy = `{
-	"Version": "2012-10-17",
-	"Statement": [
-		{
-			"Effect": "Allow",
-			"Action": [
-				"ec2:DescribeInstances",
-				"ec2:DescribeInstanceTypes",
-				"ec2:DescribeRouteTables",
-				"ec2:DescribeSecurityGroups",
-				"ec2:DescribeSubnets",
-				"ec2:DescribeVolumes",
-				"ec2:DescribeVolumesModifications",
-				"ec2:DescribeVpcs",
-				"eks:DescribeCluster"
-			],
-			"Resource": "*"
-		}
-	]
-}`
-)
-
-func (r *ClusterReconciler) updateWorkerIamRole(cluster v1alpha1.Cluster, role *iamv1beta1.Role) {
-	controllerutil.SetControllerReference(&cluster, &role.ObjectMeta, r.Scheme)
-
-	// note: we must set the keys individually, we should not directly assign .Spec,
-	//       otherwise values provided by crossplane would be overridden with the default value.
-	//       We would end up in a case where both controllers fight over the .Spec values.
-	//       As a matter of fact, crossplane will likely fail to update the status
-	//       due to a resource conflict.
-
-	role.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
-	role.Spec.ForProvider.AssumeRolePolicy = &assumeRolePolicy
-	role.Spec.ForProvider.InlinePolicy = []iamv1beta1.InlinePolicyParameters{
-		{
-			Name:   utilpointer.String("ecr-read"),
-			Policy: &ecrReadPolicy,
-		},
-		{
-			Name:   utilpointer.String("cni"),
-			Policy: &cniPolicy,
-		},
-		{
-			Name:   utilpointer.String("worker-node"),
-			Policy: &workerNodePolicy,
-		},
-	}
-	// note: the Kind=NodeGroup references this via Spec.NodeRoleArnSelector
-	//       hence the LabelNodeIAMRole label.
-	role.ObjectMeta.Labels = map[string]string{
-		v1alpha1.LabelClusterName: cluster.Name,
-		v1alpha1.LabelNodeIAMRole: "",
-	}
-}
-
-func nodeGroupName(groupName, availabilityZone string) string {
-	return fmt.Sprintf("%s-%s", groupName, availabilityZone)
-}
-
-func (r *ClusterReconciler) updateNodeGroup(
-	group v1alpha1.NodeGroup,
-	cluster v1alpha1.Cluster,
-	subnet ec2v1beta1.Subnet,
-	nodeGroup *eksv1beta1.NodeGroup,
-	desiredLTVersion float64) {
-	name := nodeGroupName(group.Name, *subnet.Status.AtProvider.AvailabilityZone)
-	controllerutil.SetControllerReference(&cluster, &nodeGroup.ObjectMeta, r.Scheme)
-
-	// note: we must set the keys individually, we should not directly assign .Spec,
-	//       otherwise values provided by crossplane would be overridden with the default value.
-	//       We would end up in a case where both controllers fight over the .Spec values.
-	//       As a matter of fact, crossplane will likely fail to update the status
-	//       due to a resource conflict.
-	if nodeGroup.ObjectMeta.Annotations == nil {
-		nodeGroup.ObjectMeta.Annotations = make(map[string]string)
-	}
-	nodeGroup.ObjectMeta.Annotations["launch-template-version"] = strconv.FormatFloat(desiredLTVersion, 'f', 0, 64)
-	nodeGroup.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
-	nodeGroup.Spec.DeletionPolicy = crossplanecommonv1.DeletionDelete
-	nodeGroup.Spec.ManagementPolicies = crossplanecommonv1.ManagementPolicies{
-		crossplanecommonv1.ManagementActionAll,
-	}
-	nodeGroup.Spec.ForProvider.Region = &cluster.Spec.Region
-	nodeGroup.Spec.ForProvider.ReleaseVersion = nil
-	nodeGroup.Spec.ForProvider.ScalingConfig = []eksv1beta1.ScalingConfigParameters{
-		{
-			DesiredSize: &group.DesiredSize,
-			MinSize:     &group.MinSize,
-			MaxSize:     &group.MaxSize,
-		},
-	}
-	nodeGroup.Spec.ForProvider.AMIType = utilpointer.String("CUSTOM")
-	nodeGroup.Spec.ForProvider.ClusterNameRef = &crossplanecommonv1.Reference{
-		Name: cluster.Name,
-	}
-
-	nodeGroup.Spec.ForProvider.SubnetIds = []*string{subnet.Status.AtProvider.ID}
-	nodeGroup.Spec.ForProvider.NodeRoleArnSelector = &crossplanecommonv1.Selector{
-		MatchLabels: map[string]string{
-			v1alpha1.LabelClusterName: cluster.Name,
-			v1alpha1.LabelNodeIAMRole: "",
-		},
-	}
-	nodeGroup.Spec.ForProvider.LaunchTemplate = []eksv1beta1.LaunchTemplateParameters{
-		{
-			Name:    utilpointer.String(name),
-			Version: utilpointer.String(fmt.Sprintf("%d", int(desiredLTVersion))),
-		},
-	}
-	nodeGroup.Spec.ForProvider.UpdateConfig = []eksv1beta1.UpdateConfigParameters{
-		{
-			MaxUnavailablePercentage: utilpointer.Float64(33),
-		},
-	}
-	nodeGroup.Spec.ForProvider.Labels = map[string]*string{
-		v1alpha1.LabelNodePool: utilpointer.String(name),
-	}
 }
 
 func (r *ClusterReconciler) setReadyCondition(cluster *v1alpha1.Cluster, status v1.ConditionStatus, reason, message string) {

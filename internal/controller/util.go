@@ -1,8 +1,13 @@
 package controller
 
 import (
+	"encoding/json"
+	"fmt"
+
 	crossplanecommonv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	v1alpha1 "github.com/moolen/node-lifecycle-manager/api/v1alpha1"
+	ec2v1beta1 "github.com/upbound/provider-aws/apis/ec2/v1beta1"
+	"github.com/wI2L/jsondiff"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -116,4 +121,16 @@ func resourceReady(conds []crossplanecommonv1.Condition) bool {
 		}
 	}
 	return false
+}
+
+func launchTemplateSynced(launchTemplate ec2v1beta1.LaunchTemplate) bool {
+	diff, err := jsondiff.Compare(launchTemplate.Spec.ForProvider, launchTemplate.Status.AtProvider)
+	if err != nil {
+		return false
+	}
+	fmt.Println("---- launch template diff ----")
+	bt, _ := json.MarshalIndent(diff, "", "  ")
+	fmt.Println(string(bt))
+	fmt.Println("---- end launch template diff ----")
+	return len(diff) == 0
 }
