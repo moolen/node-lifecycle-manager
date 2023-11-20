@@ -17,8 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	ec2v1beta1 "github.com/upbound/provider-aws/apis/ec2/v1beta1"
-	eksv1beta1 "github.com/upbound/provider-aws/apis/eks/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -26,7 +24,11 @@ import (
 const (
 	LabelClusterName = "eks.nlm.tech/cluster-name"
 	LabelNodeIAMRole = "eks.nlm.tech/node-iam-role"
-	LabelNodePool    = "eks.nlm.tech/node-pool"
+	LabelNodePool    = "nlm.tech/node-pool"
+
+	FieldOwner = "eks.nlm.tech"
+
+	FinalizerDeletionProtection = "eks.nlm.tech/deletion-protection"
 )
 
 // ClusterSpec defines the desired state of Cluster
@@ -37,18 +39,15 @@ type ClusterSpec struct {
 
 type NodeGroupSpec struct {
 	UpdateStrategy NodeGroupUpdateStrategy `json:"updateStrategy"`
-	Template       NodeGroupTemplate       `json:"template"`
 	Groups         []NodeGroup             `json:"groups"`
 }
 
-type NodeGroupTemplate struct {
-	LaunchTemplateSpec ec2v1beta1.LaunchTemplateSpec `json:"launchTemplateSpec"`
-	NodeGroupSpec      eksv1beta1.NodeGroupSpec      `json:"nodeGroupSpec"`
-}
-
 type NodeGroup struct {
-	Name string `json:"name"`
-	AMI  string `json:"ami"`
+	Name        string  `json:"name"`
+	AMI         string  `json:"ami"`
+	MinSize     float64 `json:"minSize"`
+	MaxSize     float64 `json:"maxSize"`
+	DesiredSize float64 `json:"desiredSize"`
 }
 
 type NodeGroupUpdateStrategy struct {
@@ -81,8 +80,9 @@ type ClusterStatus struct {
 }
 
 type NodeGroupStatus struct {
-	Name       string            `json:"name"`
-	Conditions []StatusCondition `json:"conditions"`
+	Name                     string            `json:"name"`
+	LaunchTemplateLastUpdate metav1.Time       `json:"launchTemplateLastUpdate,omitempty"`
+	Conditions               []StatusCondition `json:"conditions,omitempty"`
 }
 
 type ConditionType string

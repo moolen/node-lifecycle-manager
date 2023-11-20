@@ -13,44 +13,14 @@ spec:
       rollingUpdate:
         maxUnavailable: 1
 
-    template:
-      nodeGroupSpec:
-        deletionPolicy: Delete
-        managementPolicies: ["*"]
-        forProvider:
-          region: eu-central-1 
-          amiType: CUSTOM
-          scalingConfig:
-            - desiredSize: 1
-              maxSize: 1
-              minSize: 1
-          labels:
-            pool: bar 
-      launchTemplateSpec:
-        forProvider:
-          # vpcSecurityGroupIds:
-          #   - sg-0c498db71d0d48f49 # <-- TODO
-          #   - sg-0ee01b07890b42521
-          #   - sg-09442361e07fdf0f7
-          blockDeviceMappings:
-            - deviceName: /dev/sda1
-              ebs:
-                - volumeSize: 20
-          disableApiTermination: true
-          metadataOptions:
-            - httpEndpoint: enabled
-              httpPutResponseHopLimit: 1
-              httpTokens: required
-              instanceMetadataTags: enabled
-          region: "" # empty, set by ctrl
-          tagSpecifications:
-            - resourceType: instance
-              tags:
-                Name: test-lg
     groups:
     - name: general
-      ami: ami-0b9b30c466935db49
-    - name: foo
-      ami: ami-0b9b30c466935db49
-    - name: bar
-      ami: ami-0b9b30c466935db49
+      ami: ami-0b9b30c466935db49 # ami-01728bd5cea21d157
+      minSize: 1
+      maxSize: 1
+      desiredSize: 1
+    # - name: bar
+    #   ami: ami-0b9b30c466935db49
+    #   minSize: 1
+    #   maxSize: 1
+    #   desiredSize: 1

@@ -1,12 +1,13 @@
 package controller
 
 import (
+	crossplanecommonv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	v1alpha1 "github.com/moolen/node-lifecycle-manager/api/v1alpha1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// NewClusterCondition a set of default options for creating an External Secret Condition.
+// NewClusterCondition a set of default options for creating the resource Condition.
 func NewClusterCondition(condType v1alpha1.ConditionType, status v1.ConditionStatus, reason, message string) *v1alpha1.StatusCondition {
 	return &v1alpha1.StatusCondition{
 		Type:               condType,
@@ -27,10 +28,10 @@ func GetClusterCondition(status v1alpha1.ClusterStatus, condType v1alpha1.Condit
 	return nil
 }
 
-// SetClusterCondition updates the external secret to include the provided
+// SetClusterCondition updates the resource to include the provided
 // condition.
-func SetClusterCondition(es *v1alpha1.Cluster, condition v1alpha1.StatusCondition) {
-	currentCond := GetClusterCondition(es.Status, condition.Type)
+func SetClusterCondition(cluster *v1alpha1.Cluster, condition v1alpha1.StatusCondition) {
+	currentCond := GetClusterCondition(cluster.Status, condition.Type)
 
 	if currentCond != nil && currentCond.Status == condition.Status &&
 		currentCond.Reason == condition.Reason && currentCond.Message == condition.Message {
@@ -42,11 +43,11 @@ func SetClusterCondition(es *v1alpha1.Cluster, condition v1alpha1.StatusConditio
 		condition.LastTransitionTime = currentCond.LastTransitionTime
 	}
 
-	es.Status.Conditions = append(filterOutCondition(es.Status.Conditions, condition.Type), condition)
+	cluster.Status.Conditions = append(filterOutCondition(cluster.Status.Conditions, condition.Type), condition)
 }
 
-// GetNodePoolCondition returns the condition with the provided type.
-func GetNodePoolCondition(poolName string, status v1alpha1.ClusterStatus, condType v1alpha1.ConditionType) *v1alpha1.StatusCondition {
+// GetNodeGroupCondition returns the condition with the provided type.
+func GetNodeGroupCondition(poolName string, status v1alpha1.ClusterStatus, condType v1alpha1.ConditionType) *v1alpha1.StatusCondition {
 	for _, pool := range status.NodeGroups {
 		if poolName != pool.Name {
 			continue
@@ -60,10 +61,23 @@ func GetNodePoolCondition(poolName string, status v1alpha1.ClusterStatus, condTy
 	return nil
 }
 
-// SetNodePoolCondition updates the external secret to include the provided
+func updateLaunchTemplateLastUpdateTime(groupName string, cluster *v1alpha1.Cluster, lastUpdate metav1.Time) {
+	for i := range cluster.Status.NodeGroups {
+		if groupName == cluster.Status.NodeGroups[i].Name {
+			cluster.Status.NodeGroups[i].LaunchTemplateLastUpdate = lastUpdate
+			return
+		}
+	}
+	cluster.Status.NodeGroups = append(cluster.Status.NodeGroups, v1alpha1.NodeGroupStatus{
+		Name:                     groupName,
+		LaunchTemplateLastUpdate: lastUpdate,
+	})
+}
+
+// SetNodeGroupCondition updates the resource to include the provided
 // condition.
-func SetNodePoolCondition(poolName string, es *v1alpha1.Cluster, condition v1alpha1.StatusCondition) {
-	currentCond := GetNodePoolCondition(poolName, es.Status, condition.Type)
+func SetNodeGroupCondition(poolName string, cluster *v1alpha1.Cluster, condition v1alpha1.StatusCondition) {
+	currentCond := GetNodeGroupCondition(poolName, cluster.Status, condition.Type)
 
 	if currentCond != nil && currentCond.Status == condition.Status &&
 		currentCond.Reason == condition.Reason && currentCond.Message == condition.Message {
@@ -75,11 +89,11 @@ func SetNodePoolCondition(poolName string, es *v1alpha1.Cluster, condition v1alp
 		condition.LastTransitionTime = currentCond.LastTransitionTime
 	}
 
-	for i, pool := range es.Status.NodeGroups {
+	for i, pool := range cluster.Status.NodeGroups {
 		if pool.Name != poolName {
 			continue
 		}
-		es.Status.NodeGroups[i].Conditions = append(filterOutCondition(es.Status.Conditions, condition.Type), condition)
+		cluster.Status.NodeGroups[i].Conditions = append(filterOutCondition(cluster.Status.Conditions, condition.Type), condition)
 	}
 }
 
@@ -93,4 +107,13 @@ func filterOutCondition(conditions []v1alpha1.StatusCondition, condType v1alpha1
 		newConditions = append(newConditions, c)
 	}
 	return newConditions
+}
+
+func resourceReady(conds []crossplanecommonv1.Condition) bool {
+	for _, cond := range conds {
+		if cond.Type == crossplanecommonv1.TypeReady && cond.Status == v1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
