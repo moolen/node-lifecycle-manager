@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	crossplanecommonv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -33,8 +34,9 @@ const (
 
 // ClusterSpec defines the desired state of Cluster
 type ClusterSpec struct {
-	Region        string        `json:"region"`
-	NodeGroupSpec NodeGroupSpec `json:"nodeGroupSpec"`
+	Region                  string                        `json:"region"`
+	ProviderConfigReference *crossplanecommonv1.Reference `json:"providerConfigRef,omitempty"`
+	NodeGroupSpec           NodeGroupSpec                 `json:"nodeGroupSpec"`
 }
 
 type NodeGroupSpec struct {

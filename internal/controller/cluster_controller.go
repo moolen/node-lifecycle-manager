@@ -476,6 +476,7 @@ func (r *ClusterReconciler) updateEKSCluster(cluster v1alpha1.Cluster, eksCluste
 	eksCluster.Labels = map[string]string{
 		v1alpha1.LabelClusterName: cluster.Name,
 	}
+	eksCluster.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
 	eksCluster.Spec.ResourceSpec.ManagementPolicies = crossplanecommonv1.ManagementPolicies{
 		crossplanecommonv1.ManagementActionObserve,
 	}
@@ -496,6 +497,7 @@ func (r *ClusterReconciler) updateSubnet(name string, cluster v1alpha1.Cluster, 
 	subnet.ObjectMeta.Annotations = map[string]string{
 		"crossplane.io/external-name": name,
 	}
+	subnet.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
 	subnet.Spec.ForProvider.Region = &cluster.Spec.Region
 	subnet.Spec.ResourceSpec.ManagementPolicies = crossplanecommonv1.ManagementPolicies{
 		crossplanecommonv1.ManagementActionObserve,
@@ -524,6 +526,7 @@ func (r *ClusterReconciler) updateLaunchTemplate(group v1alpha1.NodeGroup, clust
 	launchTemplate.ObjectMeta.Labels = map[string]string{
 		v1alpha1.LabelClusterName: cluster.Name,
 	}
+	launchTemplate.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
 
 	// TODO: consider exposing block device configuration via Cluster.spec.nodeGroupSpec.groups[]
 	launchTemplate.Spec.ForProvider.BlockDeviceMappings = []ec2v1beta1.BlockDeviceMappingsParameters{
@@ -685,6 +688,7 @@ func (r *ClusterReconciler) updateWorkerIamRole(cluster v1alpha1.Cluster, role *
 	//       As a matter of fact, crossplane will likely fail to update the status
 	//       due to a resource conflict.
 
+	role.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
 	role.Spec.ForProvider.AssumeRolePolicy = &assumeRolePolicy
 	role.Spec.ForProvider.InlinePolicy = []iamv1beta1.InlinePolicyParameters{
 		{
@@ -730,6 +734,7 @@ func (r *ClusterReconciler) updateNodeGroup(
 		nodeGroup.ObjectMeta.Annotations = make(map[string]string)
 	}
 	nodeGroup.ObjectMeta.Annotations["launch-template-version"] = strconv.FormatFloat(desiredLTVersion, 'f', 0, 64)
+	nodeGroup.Spec.ProviderConfigReference = cluster.Spec.ProviderConfigReference
 	nodeGroup.Spec.DeletionPolicy = crossplanecommonv1.DeletionDelete
 	nodeGroup.Spec.ManagementPolicies = crossplanecommonv1.ManagementPolicies{
 		crossplanecommonv1.ManagementActionAll,

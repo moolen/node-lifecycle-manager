@@ -6,6 +6,8 @@ metadata:
   name: mj-eso
 spec: 
   region: eu-central-1
+  providerConfigRef:
+    name: default
   nodeGroupSpec:
     # define a strategy for the node rollout process
     # this allows you to parallelize it.
